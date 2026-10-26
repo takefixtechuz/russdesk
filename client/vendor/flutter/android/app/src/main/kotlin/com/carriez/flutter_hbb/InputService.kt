@@ -99,6 +99,8 @@ class InputService : AccessibilityService() {
 
     private var lastX = 0
     private var lastY = 0
+    private var gestureStartX = 0
+    private var gestureStartY = 0
 
     private val volumeController: VolumeController by lazy { VolumeController(applicationContext.getSystemService(AUDIO_SERVICE) as AudioManager) }
 
@@ -147,8 +149,14 @@ class InputService : AccessibilityService() {
         if (mask == LEFT_UP) {
             if (leftIsDown) {
                 leftIsDown = false
+                val wasShortTap = isWaitingLongPress
                 isWaitingLongPress = false
                 endGesture(mouseX, mouseY)
+                if (wasShortTap) {
+                    // Nektar (27.10.2026): ТВ-лаунчеры (leanback) игнорируют dispatchGesture, но принимают
+                    // ACTION_CLICK по узлу под точкой — дублируем короткий тап кликом по элементу
+                    clickNodeAt(mouseX, mouseY)
+                }
                 return
             }
         }
@@ -238,7 +246,11 @@ class InputService : AccessibilityService() {
                 startGesture(mouseX, mouseY)
             }
             TOUCH_PAN_END -> {
+                val movedFar = abs(mouseX - gestureStartX) + abs(mouseY - gestureStartY) > 20
                 endGesture(mouseX, mouseY)
+                if (!movedFar) {
+                    clickNodeAt(mouseX, mouseY)
+                }
                 mouseX = max(0, _x) * SCREEN_INFO.scale
                 mouseY = max(0, _y) * SCREEN_INFO.scale
             }
@@ -283,6 +295,43 @@ class InputService : AccessibilityService() {
         }
     }
 
+    // Nektar (27.10.2026): клик по элементу интерфейса под точкой через дерево доступности.
+    // Для leanback-приложений (Android TV) dispatchGesture ничего не делает: там нет тач-режима,
+    // элементы реагируют только на фокус/клик. Ищем самый глубокий кликабельный узел, содержащий
+    // точку (экранные координаты), и шлём ACTION_CLICK; если узел не кликабелен — поднимаемся к родителю.
+    private fun clickNodeAt(x: Int, y: Int) {
+        try {
+            val root = rootInActiveWindow ?: return
+            var best: AccessibilityNodeInfo? = null
+            var bestArea = Int.MAX_VALUE
+            val stack = java.util.ArrayDeque<AccessibilityNodeInfo>()
+            stack.add(root)
+            val r = Rect()
+            var visited = 0
+            while (stack.isNotEmpty() && visited < 4000) {
+                val n = stack.removeLast()
+                visited++
+                n.getBoundsInScreen(r)
+                if (!r.contains(x, y)) continue
+                if (n.isClickable && n.isVisibleToUser) {
+                    val area = r.width() * r.height()
+                    if (area in 1 until bestArea) { best = n; bestArea = area }
+                }
+                for (i in 0 until n.childCount) {
+                    n.getChild(i)?.let { stack.add(it) }
+                }
+            }
+            if (best == null) {
+                Log.d(logTag, "clickNodeAt $x,$y: no clickable node")
+                return
+            }
+            val ok = best.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            Log.d(logTag, "clickNodeAt $x,$y -> ${best.className} \"${best.text ?: best.contentDescription ?: ""}\" click=$ok")
+        } catch (e: Exception) {
+            Log.e(logTag, "clickNodeAt error: $e")
+        }
+    }
+
     @RequiresApi(Build.VERSION_CODES.N)
     private fun longPress(x: Int, y: Int) {
         performClick(x, y, longPressDuration)
@@ -298,6 +347,8 @@ class InputService : AccessibilityService() {
         lastTouchGestureStartTime = System.currentTimeMillis()
         lastX = x
         lastY = y
+        gestureStartX = x
+        gestureStartY = y
     }
 
     @RequiresApi(Build.VERSION_CODES.N)
