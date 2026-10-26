@@ -129,9 +129,13 @@ jobs:
 
       # как в официальном flutter-build.yml RustDesk: системные пакеты для vcpkg/ffmpeg и NDK-сборки
       - name: Install build dependencies
+        timeout-minutes: 15   # 26.10: шаг однажды завис на 45+ мин (apt ждал ввода/зеркало); Java ставит setup-java ниже
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang cmake curl gcc-multilib git g++ g++-multilib libclang-dev libunwind-dev llvm-dev nasm ninja-build openjdk-17-jdk-headless pkg-config tree wget
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Dpkg::Options::="--force-confnew" \
+            clang cmake curl gcc-multilib git g++ g++-multilib libclang-dev libunwind-dev llvm-dev nasm ninja-build pkg-config tree wget
 
       - name: Bake server config into the client
         env:
