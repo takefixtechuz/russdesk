@@ -159,6 +159,13 @@ jobs:
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
+      # на своём раннере Android SDK нет («No Android SDK found») — ставим cmdline-tools + платформу (compileSdk 36)
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-36 build-tools;36.0.0"
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+
       - uses: nttld/setup-ndk@v1
         id: ndk
         with:
