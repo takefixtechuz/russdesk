@@ -180,7 +180,7 @@ jobs:
       - name: Setup vcpkg with GitHub Actions binary cache
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgDirectory: ${{ runner.tool_cache }}/vcpkg   # /opt недоступен на своём раннере (EACCES); tool_cache есть везде и сохраняется
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
 
       - name: Build Rust jniLibs + APK
@@ -188,7 +188,7 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
-          VCPKG_ROOT: /opt/artifacts/vcpkg
+          VCPKG_ROOT: ${{ runner.tool_cache }}/vcpkg
         run: |
           # как «Build rustdesk lib» + «Build rustdesk» в официальном flutter-build.yml (только arm64 — все
           # современные телефоны); build_android.sh из репозитория для CI не годится: старый путь strip,
