@@ -21,6 +21,7 @@ import android.view.ViewGroup.LayoutParams
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.KeyEvent as KeyEventAndroid
 import android.view.ViewConfiguration
+import android.view.View
 import android.graphics.Rect
 import android.media.AudioManager
 import android.accessibilityservice.AccessibilityServiceInfo
@@ -478,6 +479,8 @@ class InputService : AccessibilityService() {
                 return
             } else if (tryHandlePowerKeyEvent(event)) {
                 return
+            } else if (tryHandleTvNavKey(event)) {
+                return
             }
         }
 
@@ -518,6 +521,63 @@ class InputService : AccessibilityService() {
                 }
             }
         }
+    }
+
+    // Nektar (27.10.2026): клавиши «пульта» для Android TV. Вне текстового поля стрелки двигают
+    // фокус по дереву доступности (focusSearch + ACTION_FOCUS), Enter/центр — ACTION_CLICK по
+    // сфокусированному, Esc/Back — назад, Home — главный экран. В поле ввода — обычный путь.
+    private fun tryHandleTvNavKey(event: KeyEventAndroid): Boolean {
+        val code = event.keyCode
+        val dir = when (code) {
+            KeyEventAndroid.KEYCODE_DPAD_UP -> View.FOCUS_UP
+            KeyEventAndroid.KEYCODE_DPAD_DOWN -> View.FOCUS_DOWN
+            KeyEventAndroid.KEYCODE_DPAD_LEFT -> View.FOCUS_LEFT
+            KeyEventAndroid.KEYCODE_DPAD_RIGHT -> View.FOCUS_RIGHT
+            else -> 0
+        }
+        val isEnter = code == KeyEventAndroid.KEYCODE_DPAD_CENTER || code == KeyEventAndroid.KEYCODE_ENTER || code == KeyEventAndroid.KEYCODE_NUMPAD_ENTER
+        val isBack = code == KeyEventAndroid.KEYCODE_ESCAPE || code == KeyEventAndroid.KEYCODE_BACK
+        val isHome = code == KeyEventAndroid.KEYCODE_HOME || code == KeyEventAndroid.KEYCODE_MOVE_HOME
+        if (dir == 0 && !isEnter && !isBack && !isHome) return false
+        val root = rootInActiveWindow ?: return false
+        val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        if (focused != null && focused.isEditable) return false
+        if (event.action != KeyEventAndroid.ACTION_DOWN) return true
+        try {
+            when {
+                dir != 0 -> {
+                    var next = focused?.focusSearch(dir)
+                    if (next == null && focused == null) next = root.focusSearch(dir) ?: firstFocusable(root)
+                    val ok = next?.performAction(AccessibilityNodeInfo.ACTION_FOCUS) ?: false
+                    Log.d(logTag, "tvNav dir=$dir -> ${next?.className} \"${next?.contentDescription ?: next?.text ?: ""}\" focus=$ok")
+                }
+                isEnter -> {
+                    val target = focused ?: root.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+                    val ok = target?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+                    Log.d(logTag, "tvNav enter -> ${target?.className} click=$ok")
+                }
+                isBack -> performGlobalAction(GLOBAL_ACTION_BACK)
+                isHome -> performGlobalAction(GLOBAL_ACTION_HOME)
+            }
+        } catch (e: Exception) {
+            Log.e(logTag, "tvNav error: $e")
+        }
+        return true
+    }
+
+    private fun firstFocusable(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val stack = java.util.ArrayDeque<AccessibilityNodeInfo>()
+        stack.add(root)
+        var visited = 0
+        while (stack.isNotEmpty() && visited < 4000) {
+            val n = stack.removeFirst()
+            visited++
+            if (n.isFocusable && n.isVisibleToUser && n !== root) return n
+            for (i in 0 until n.childCount) {
+                n.getChild(i)?.let { stack.add(it) }
+            }
+        }
+        return null
     }
 
     private fun tryHandleVolumeKeyEvent(event: KeyEventAndroid): Boolean {
