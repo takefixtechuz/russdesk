@@ -58,7 +58,24 @@ jobs:
     if: contains(github.event.inputs.targets || 'android+windows', 'android')
     runs-on: ubuntu-22.04
     steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
       - uses: actions/checkout@v4
+
+      # как в официальном flutter-build.yml RustDesk: системные пакеты для vcpkg/ffmpeg и NDK-сборки
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake curl gcc-multilib git g++ g++-multilib libclang-dev libunwind-dev llvm-dev nasm ninja-build openjdk-17-jdk-headless pkg-config tree wget
 
       - name: Bake server config into the client
         env:
@@ -87,16 +104,29 @@ jobs:
           ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: true
 
+      - name: Patch flutter (dropdown enableFilter, как в RustDesk CI для 3.24.5)
+        run: |
+          cd $(dirname $(dirname $(which flutter)))
+          git apply ${{ github.workspace }}/client/vendor/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff || true
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_VERSION }}
           targets: "aarch64-linux-android,armv7-linux-androideabi"
+
+      # без этого build_android_deps.sh падает: «Please set VCPKG_ROOT environment variable»
+      - name: Setup vcpkg with GitHub Actions binary cache
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
 
       - name: Build Rust jniLibs + APK
         working-directory: client/vendor
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+          VCPKG_ROOT: /opt/artifacts/vcpkg
         run: |
           cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
           ./flutter/build_android_deps.sh arm64-v8a armeabi-v7a
