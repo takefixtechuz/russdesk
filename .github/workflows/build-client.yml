@@ -58,7 +58,7 @@ jobs:
   # job'ой (.github/workflows/bridge.yml) и подкладывает в сборки; без него cargo падает с
   # «file not found for module bridge_generated». Повторяем здесь (26.10.2026).
   bridge:
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, linux, office]   # свой раннер (Podman на офисном ПК), кэш инструментов сохраняется
     steps:
       - uses: actions/checkout@v4
 
@@ -106,9 +106,10 @@ jobs:
   android:
     if: contains(github.event.inputs.targets || 'android+windows', 'android')
     needs: bridge
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, linux, office]
     steps:
       - name: Free disk space
+        if: runner.environment == 'github-hosted'
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
           tool-cache: true
@@ -163,6 +164,7 @@ jobs:
         with:
           ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: true
+          local-cache: true
 
       - name: Patch flutter (dropdown enableFilter, как в RustDesk CI для 3.24.5)
         run: |
