@@ -163,7 +163,11 @@ class InputService : AccessibilityService() {
         }
 
         if (mask == RIGHT_UP) {
-            longPress(mouseX, mouseY)
+            if (isTv) {
+                performGlobalAction(GLOBAL_ACTION_BACK)   // Nektar: на ТВ правая кнопка = «Назад» (долгий тап лаунчер игнорирует)
+            } else {
+                longPress(mouseX, mouseY)
+            }
             return
         }
 
@@ -190,6 +194,11 @@ class InputService : AccessibilityService() {
                 recentActionTask!!.cancel()
                 performGlobalAction(GLOBAL_ACTION_HOME)
             }
+            return
+        }
+
+        if (isTv && (mask == WHEEL_DOWN || mask == WHEEL_UP)) {
+            tvScroll(mouseX, mouseY, mask == WHEEL_DOWN)   // Nektar: на ТВ колесо = прокрутка списка под курсором или шаг фокуса
             return
         }
 
@@ -563,6 +572,50 @@ class InputService : AccessibilityService() {
             Log.e(logTag, "tvNav error: $e")
         }
         return true
+    }
+
+    private val isTv: Boolean by lazy {
+        try { packageManager.hasSystemFeature("android.software.leanback") } catch (e: Exception) { false }
+    }
+
+    // Nektar (27.10.2026): колесо на ТВ. Ищем прокручиваемый узел под точкой → ACTION_SCROLL_FORWARD/BACKWARD;
+    // если такого нет — двигаем фокус вниз/вверх, как стрелками пульта.
+    private fun tvScroll(x: Int, y: Int, down: Boolean) {
+        try {
+            val root = rootInActiveWindow ?: return
+            var best: AccessibilityNodeInfo? = null
+            var bestArea = Int.MAX_VALUE
+            val stack = java.util.ArrayDeque<AccessibilityNodeInfo>()
+            stack.add(root)
+            val r = Rect()
+            var visited = 0
+            while (stack.isNotEmpty() && visited < 4000) {
+                val n = stack.removeLast()
+                visited++
+                n.getBoundsInScreen(r)
+                if (!r.contains(x, y)) continue
+                if (n.isScrollable && n.isVisibleToUser) {
+                    val area = r.width() * r.height()
+                    if (area in 1 until bestArea) { best = n; bestArea = area }
+                }
+                for (i in 0 until n.childCount) {
+                    n.getChild(i)?.let { stack.add(it) }
+                }
+            }
+            if (best != null) {
+                val action = if (down) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                val ok = best.performAction(action)
+                Log.d(logTag, "tvScroll ${if (down) "down" else "up"} -> ${best.className} ok=$ok")
+                if (ok) return
+            }
+            val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            val dir = if (down) View.FOCUS_DOWN else View.FOCUS_UP
+            val next = focused?.focusSearch(dir) ?: root.focusSearch(dir) ?: firstFocusable(root)
+            val ok = next?.performAction(AccessibilityNodeInfo.ACTION_FOCUS) ?: false
+            Log.d(logTag, "tvScroll focus dir=$dir -> ${next?.className} ok=$ok")
+        } catch (e: Exception) {
+            Log.e(logTag, "tvScroll error: $e")
+        }
     }
 
     private fun firstFocusable(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
