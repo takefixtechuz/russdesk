@@ -192,17 +192,28 @@ jobs:
           # современные телефоны); build_android.sh из репозитория для CI не годится: старый путь strip,
           # три сборки подряд и Gradle с -Xmx1024M → R8 OutOfMemoryError (26.10.2026)
           cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
+          sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx4g/g" ./flutter/android/gradle.properties
+          sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
+          host=$(printf '%s' "$ID_SERVER" | sed 's#^[a-z]*://##; s#[:/].*##')
+          mkdir -p ./dist
+          # arm64 — телефоны; armeabi-v7a — 32-битные ТВ-приставки (X88 Pro X5M: abilist armeabi-v7a,armeabi), 26.10.2026
+          # arm64
           ./flutter/build_android_deps.sh arm64-v8a
           ./flutter/ndk_arm64.sh
           mkdir -p ./flutter/android/app/src/main/jniLibs/arm64-v8a
           cp ./target/aarch64-linux-android/release/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
           cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/
-          sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx4g/g" ./flutter/android/gradle.properties
-          sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
-          cd flutter && flutter pub get
-          flutter build apk --release --target-platform android-arm64 --split-per-abi
-          host=$(printf '%s' "$ID_SERVER" | sed 's#^[a-z]*://##; s#[:/].*##')
-          mkdir -p ../dist && mv build/app/outputs/flutter-apk/app-arm64-v8a-release.apk "../dist/russdesk-${host}-android-arm64.apk"
+          ( cd flutter && flutter pub get && flutter build apk --release --target-platform android-arm64 --split-per-abi )
+          mv ./flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk "./dist/russdesk-${host}-android-arm64.apk"
+          # armeabi-v7a
+          ./flutter/build_android_deps.sh armeabi-v7a
+          ./flutter/ndk_arm.sh
+          rm -rf ./flutter/android/app/src/main/jniLibs/arm64-v8a
+          mkdir -p ./flutter/android/app/src/main/jniLibs/armeabi-v7a
+          cp ./target/armv7-linux-androideabi/release/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/armeabi-v7a/librustdesk.so
+          cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/arm-linux-androideabi/libc++_shared.so ./flutter/android/app/src/main/jniLibs/armeabi-v7a/
+          ( cd flutter && flutter build apk --release --target-platform android-arm --split-per-abi )
+          mv ./flutter/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk "./dist/russdesk-${host}-android-armv7.apk"
 
       - uses: actions/upload-artifact@v4
         with:
