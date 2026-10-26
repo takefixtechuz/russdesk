@@ -82,6 +82,7 @@ pub fn collect() -> Value {
     v["platform"] = json!(std::env::consts::OS);
     v["arch"] = json!(std::env::consts::ARCH);
     v["collected_at"] = json!(hbb_common::get_time() / 1000);
+    refine_cpu_mem(&mut v);
     v["displays"] = displays();
     v["gpu"] = json!(gpu());
     v["storage"] = json!(storage());
@@ -89,6 +90,70 @@ pub fn collect() -> Value {
     v["security"] = security();
     v
 }
+
+// ---- процессор и память точнее, чем у sysinfo ------------------------------------
+// sysinfo отдаёт текущую частоту (на ТВ-приставке это случайный снимок, например 1.37 ГГц
+// при максимуме 2.5) и память за вычетом резерва ядра. Берём максимум из cpufreq и
+// MemTotal, на Android — ещё модель SoC.
+
+fn read(path: &str) -> String {
+    std::fs::read_to_string(path).map(|s| s.trim().to_string()).unwrap_or_default()
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn refine_cpu_mem(v: &mut Value) {
+    let max_khz: u64 = read("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq").parse().unwrap_or(0);
+    let cores = num_cpus::get();
+    let cpuinfo = read("/proc/cpuinfo");
+    let model = cpuinfo
+        .lines()
+        .find(|l| l.starts_with("model name") || l.starts_with("Hardware"))
+        .and_then(|l| l.split(':').nth(1))
+        .map(|x| x.trim().to_string())
+        .unwrap_or_default();
+    #[cfg(target_os = "android")]
+    let soc = {
+        let m = getprop("ro.soc.model");
+        let man = getprop("ro.soc.manufacturer");
+        if m.is_empty() { getprop("ro.board.platform") } else if man.is_empty() { m } else { format!("{} {}", man, m) }
+    };
+    #[cfg(not(target_os = "android"))]
+    let soc = String::new();
+    let mut parts: Vec<String> = Vec::new();
+    if !soc.is_empty() {
+        parts.push(soc.clone());
+    }
+    if !model.is_empty() && !soc.contains(&model) {
+        parts.push(model);
+    }
+    if max_khz > 0 {
+        parts.push(format!("до {:.2} GHz", max_khz as f64 / 1_000_000.0));
+    }
+    parts.push(format!("{} ядер", cores));
+    v["cpu"] = json!(parts.join(", "));
+    if !soc.is_empty() {
+        v["soc"] = json!(soc);
+    }
+    let kb: u64 = read("/proc/meminfo")
+        .lines()
+        .find(|l| l.starts_with("MemTotal"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(0);
+    if kb > 0 {
+        let gb = kb as f64 / 1024.0 / 1024.0;
+        // ближайший «паспортный» размер: 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 64 ГБ
+        let nominal = [1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0, 64.0, 128.0]
+            .iter()
+            .cloned()
+            .find(|n| *n >= gb * 0.98)
+            .unwrap_or(gb);
+        v["memory"] = json!(format!("{} GB (доступно {:.2} GB)", nominal, gb));
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
+fn refine_cpu_mem(_v: &mut Value) {}
 
 // ---- экраны --------------------------------------------------------------------
 
@@ -153,17 +218,19 @@ fn gpu() -> Vec<String> {
     }
     #[cfg(target_os = "android")]
     {
+        // Драйвер Mali отдаёт точную модель в sysfs; иначе — семейство из ro.hardware.egl.
+        let mali = read("/sys/class/misc/mali0/device/gpuinfo");
+        if !mali.is_empty() {
+            return vec![mali.lines().next().unwrap_or("").trim().to_string()];
+        }
         let egl = getprop("ro.hardware.egl");
         let platform = getprop("ro.board.platform");
-        let hw = getprop("ro.hardware");
         let mut s = String::new();
         if !egl.is_empty() {
             s.push_str(&egl);
         }
         if !platform.is_empty() {
             s.push_str(&format!(" (платформа {})", platform));
-        } else if !hw.is_empty() {
-            s.push_str(&format!(" ({})", hw));
         }
         return if s.is_empty() { vec![] } else { vec![s.trim().to_string()] };
     }
@@ -282,7 +349,8 @@ fn security() -> Value {
         "android": getprop("ro.build.version.release"),
         "sdk": getprop("ro.build.version.sdk"),
         "fingerprint": getprop("ro.build.fingerprint"),
-        "model": format!("{} {}", getprop("ro.product.manufacturer"), getprop("ro.product.model")).trim(),
+        "model": format!("{} {}", getprop("ro.product.manufacturer"), getprop("ro.product.model")).trim().to_string(),
+        "ethernet_link_mbps": read("/sys/class/net/eth0/speed"),
         "bootloader_locked": getprop("ro.boot.flash.locked"),
         "debuggable": getprop("ro.debuggable") == "1",
         "selinux": { let s = run("getenforce", &[]); if s.is_empty() { getprop("ro.boot.selinux") } else { s } },
