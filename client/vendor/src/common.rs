@@ -1226,7 +1226,8 @@ pub fn get_audit_server(api: String, custom: String, typ: String) -> String {
     if url.is_empty() || is_public(&url) {
         return "".to_owned();
     }
-    format!("{}/api/audit/{}", url, typ)
+    // Fixtech: sctgdesk не принимает /api/audit/{conn,file}, отчёты о сеансах и файлах идут в кабинет.
+    format!("{}/{}", crate::inventory::AUDIT_URL, typ)
 }
 
 /// Check if we should use raw TCP proxy for API calls.
