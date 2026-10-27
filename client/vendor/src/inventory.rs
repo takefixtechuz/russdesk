@@ -24,7 +24,7 @@ pub async fn tick() {
         return;
     }
     *NEXT.lock().unwrap() = Some(Instant::now() + INTERVAL);
-    let v = match tokio::task::spawn_blocking(collect).await {
+    let v = match hbb_common::tokio::task::spawn_blocking(collect).await {
         Ok(v) => v,
         Err(e) => {
             log::warn!("inventory collect failed: {}", e);
@@ -448,6 +448,7 @@ fn hardware() -> Value {
         "bootloader": getprop("ro.bootloader"),
         "kernel": read("/proc/version").split(" (").next().unwrap_or("").replace("Linux version ", ""),
         "wifi_driver": std::fs::read_link("/sys/class/net/wlan0/device/driver").ok().and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string())).unwrap_or_default(),
+        "wifi_chip": wifi_chip(),
         "bt_name": getprop("persist.btauto.name"),
         "usb": usb_devices(),
         "uptime_hours": read("/proc/uptime").split('.').next().and_then(|x| x.parse::<u64>().ok()).map(|s| s / 3600),
@@ -471,6 +472,24 @@ fn hardware() -> Value {
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn hardware() -> Value {
     json!({ "model": run("sysctl", &["-n", "hw.model"]) })
+}
+
+#[cfg(target_os = "android")]
+fn wifi_chip() -> String {
+    // Seekwave: по имени прошивки (EA6621QT = Wi-Fi 6 1x1 + BT 5.0); Broadcom/Realtek — по драйверу.
+    let fw = run("sh", &["-c", "ls /vendor/etc/firmware /vendor/firmware 2>/dev/null | grep -iE 'SEEKWAVE|bcm|rtl|nvram' | head -3 | tr '
+' ' '"]);
+    if fw.contains("EA6621") {
+        return "Seekwave EA6621 (Wi-Fi 6 1x1 + BT 5.0)".to_string();
+    }
+    if fw.contains("EA6521") {
+        return "Seekwave EA6521 (Wi-Fi 5 + BT)".to_string();
+    }
+    let name = getprop("vendor.wifi_name");
+    if !name.is_empty() {
+        return name;
+    }
+    fw.trim().to_string()
 }
 
 #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -528,6 +547,10 @@ fn security() -> Value {
         .map(|s| s.to_string());
     let which_su = run("sh", &["-c", "command -v su 2>/dev/null"]);
     let rooted = su.is_some() || !which_su.is_empty();
+    let selinux = {
+        let s = run("getenforce", &[]);
+        if s.is_empty() { getprop("ro.boot.selinux") } else { s }
+    };
     let mut why = Vec::new();
     if vb != "green" {
         why.push(format!("verified boot: {}", if vb.is_empty() { "неизвестно" } else { &vb }));
@@ -550,7 +573,7 @@ fn security() -> Value {
         "model": format!("{} {}", getprop("ro.product.manufacturer"), getprop("ro.product.model")).trim().to_string(),
         "bootloader_locked": getprop("ro.boot.flash.locked"),
         "debuggable": getprop("ro.debuggable") == "1",
-        "selinux": { let s = run("getenforce", &[]); if s.is_empty() { getprop("ro.boot.selinux") } else { s } },
+        "selinux": selinux,
         "certified_guess": why.is_empty(),
         "certified_notes": why,
     })
