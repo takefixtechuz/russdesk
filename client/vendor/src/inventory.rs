@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 pub const INVENTORY_URL: &str = "https://remote.fixtech.uz/api/inventory";
+pub const AUDIT_URL: &str = "https://remote.fixtech.uz/api/audit"; // + /conn, /file
 const INTERVAL: Duration = Duration::from_secs(6 * 3600);
 const RETRY: Duration = Duration::from_secs(10 * 60);
 
