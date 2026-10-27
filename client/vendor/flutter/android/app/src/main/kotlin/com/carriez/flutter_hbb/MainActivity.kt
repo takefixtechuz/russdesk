@@ -370,7 +370,7 @@ class MainActivity : FlutterActivity() {
                 }
                 GET_START_ON_BOOT_OPT -> {
                     val prefs = getSharedPreferences(KEY_SHARED_PREFERENCES, MODE_PRIVATE)
-                    result.success(prefs.getBoolean(KEY_START_ON_BOOT_OPT, false))
+                    result.success(prefs.getBoolean(KEY_START_ON_BOOT_OPT, packageManager.hasSystemFeature("android.software.leanback"))) // Fixtech: ТВ — по умолчанию вкл
                 }
                 SET_START_ON_BOOT_OPT -> {
                     if (call.arguments is Boolean) {
