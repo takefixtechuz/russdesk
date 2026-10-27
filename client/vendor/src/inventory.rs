@@ -323,6 +323,17 @@ fn nics() -> Value {
         .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect())
         .unwrap_or_default();
     names.sort();
+    if names.is_empty() {
+        // Android 10+ без root не даёт перечислить /sys/class/net — берём хотя бы default_net (IP, без MAC/модели).
+        for (n, (ipv4, ipv6, gw)) in ips {
+            if ipv4.iter().all(|a| a.starts_with("127.")) {
+                continue;
+            }
+            out.push(json!({ "name": n.clone(), "type": if n.starts_with("wlan") { "Wi-Fi" } else if n.starts_with("eth") { "Ethernet" } else { "" },
+                             "mac": "", "state": "up", "up": true, "ipv4": ipv4, "ipv6": ipv6, "gateway": gw, "model": "", "driver": "" }));
+        }
+        return json!(out);
+    }
     for n in names {
         if skip.iter().any(|s| n.starts_with(s)) {
             continue;
