@@ -476,20 +476,25 @@ fn hardware() -> Value {
 
 #[cfg(target_os = "android")]
 fn wifi_chip() -> String {
-    // Seekwave: по имени прошивки (EA6621QT = Wi-Fi 6 1x1 + BT 5.0); Broadcom/Realtek — по драйверу.
-    let fw = run("sh", &["-c", "ls /vendor/etc/firmware /vendor/firmware 2>/dev/null | grep -iE 'SEEKWAVE|bcm|rtl|nvram' | head -3 | tr '
-' ' '"]);
-    if fw.contains("EA6621") {
-        return "Seekwave EA6621 (Wi-Fi 6 1x1 + BT 5.0)".to_string();
-    }
-    if fw.contains("EA6521") {
-        return "Seekwave EA6521 (Wi-Fi 5 + BT)".to_string();
+    // Приложение не может перечислить /vendor/etc/firmware, но может проверить конкретные файлы.
+    // Seekwave: EA6621 = Wi-Fi 6 1x1 + BT 5.0, EA6521 = Wi-Fi 5 + BT.
+    let dirs = ["/vendor/etc/firmware", "/vendor/firmware", "/vendor/lib/firmware", "/system/etc/firmware"];
+    let known: [(&str, &str); 2] = [
+        ("EA6621QT_SEEKWAVE_R00005.bin", "Seekwave EA6621 (Wi-Fi 6 1x1 + BT 5.0)"),
+        ("EA6521QF_SEEKWAVE_R00005.bin", "Seekwave EA6521 (Wi-Fi 5 + BT)"),
+    ];
+    for d in dirs {
+        for (f, name) in known.iter() {
+            if std::path::Path::new(&format!("{}/{}", d, f)).exists() {
+                return name.to_string();
+            }
+        }
     }
     let name = getprop("vendor.wifi_name");
     if !name.is_empty() {
         return name;
     }
-    fw.trim().to_string()
+    getprop("ro.vendor.wifi.chip")
 }
 
 #[cfg(any(target_os = "android", target_os = "linux"))]
