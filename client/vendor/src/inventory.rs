@@ -87,6 +87,7 @@ pub fn collect() -> Value {
     v["gpu"] = json!(gpu());
     v["storage"] = json!(storage());
     v["nics"] = nics();
+    v["hardware"] = hardware();
     v["security"] = security();
     v
 }
@@ -266,34 +267,231 @@ fn storage() -> Vec<String> {
 }
 
 // ---- сеть -----------------------------------------------------------------------
+// Нужны все адаптеры, включая выключенные (у них тоже есть MAC и модель), поэтому
+// default_net (только поднятые, без модели) дополняем: Linux/Android — sysfs,
+// Windows — Get-NetAdapter. IP-адреса берём из default_net по имени интерфейса.
 
-#[cfg(not(target_os = "ios"))]
-fn nics() -> Value {
-    let mut out = Vec::new();
+fn ip_map() -> std::collections::HashMap<String, (Vec<String>, Vec<String>, Option<String>)> {
+    let mut m = std::collections::HashMap::new();
+    #[cfg(not(target_os = "ios"))]
     for i in default_net::get_interfaces() {
         let ipv4: Vec<String> = i.ipv4.iter().map(|n| format!("{}/{}", n.addr, n.prefix_len)).collect();
         let ipv6: Vec<String> = i.ipv6.iter().map(|n| n.addr.to_string()).collect();
-        let mac = i.mac_addr.map(|m| m.address()).unwrap_or_default();
-        let loopback = ipv4.iter().all(|a| a.starts_with("127.")) && ipv6.iter().all(|a| a == "::1");
-        if (ipv4.is_empty() && mac.is_empty()) || (loopback && !ipv4.is_empty()) {
+        let gw = i.gateway.as_ref().map(|g| g.ip_addr.to_string());
+        m.insert(i.name.clone(), (ipv4.clone(), ipv6.clone(), gw.clone()));
+        if let Some(f) = i.friendly_name {
+            m.insert(f, (ipv4, ipv6, gw));
+        }
+    }
+    m
+}
+
+fn phy_name(id: &str) -> &'static str {
+    match id.trim() {
+        "0x001cc916" => "Realtek RTL8211F (1 Гбит)",
+        "0x001cc915" => "Realtek RTL8211E (1 Гбит)",
+        "0x001cc816" => "Realtek RTL8201F (100 Мбит)",
+        "0x001cc912" => "Realtek RTL8211D",
+        "0x00008201" => "Realtek RTL8201",
+        "0x0007c0f1" => "SMSC LAN8720",
+        "0x20005c90" => "Amlogic внутренний PHY (100 Мбит)",
+        _ => "",
+    }
+}
+
+fn driver_name(drv: &str) -> &'static str {
+    match drv {
+        "meson8b-dwmac" | "meson6-dwmac" | "stmmaceth" => "Amlogic встроенный Ethernet (DesignWare GMAC)",
+        "skw_sdio" | "skw_wifi" => "Seekwave SDIO Wi-Fi",
+        "bcmdhd" | "bcmsdh_sdmmc" | "brcmfmac" => "Broadcom Wi-Fi",
+        "wlan" | "cfg80211" => "",
+        "rtl8822cs" | "rtl8821cs" | "8822cs" | "8821cs" => "Realtek SDIO Wi-Fi",
+        "r8169" | "r8168" => "Realtek PCIe Ethernet",
+        "e1000e" | "igb" | "igc" => "Intel Ethernet",
+        "iwlwifi" => "Intel Wi-Fi",
+        _ => "",
+    }
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn nics() -> Value {
+    let ips = ip_map();
+    let mut out = Vec::new();
+    let skip = ["lo", "dummy", "erspan", "gre", "ifb", "ip6", "ip_vti", "sit", "tunl", "bond0", "teql"];
+    let mut names: Vec<String> = std::fs::read_dir("/sys/class/net")
+        .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect())
+        .unwrap_or_default();
+    names.sort();
+    for n in names {
+        if skip.iter().any(|s| n.starts_with(s)) {
             continue;
         }
+        let base = format!("/sys/class/net/{}", n);
+        let mac = read(&format!("{}/address", base));
+        let drv = std::fs::read_link(format!("{}/device/driver", base))
+            .ok()
+            .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
+            .unwrap_or_default();
+        let wireless = std::path::Path::new(&format!("{}/wireless", base)).exists()
+            || std::path::Path::new(&format!("{}/phy80211", base)).exists();
+        if mac.is_empty() || mac.starts_with("00:00:00:00") {
+            continue;
+        }
+        if drv.is_empty() && !wireless && !ips.contains_key(&n) {
+            continue; // виртуальный без драйвера и без адреса
+        }
+        let phy = read(&format!("{}/phydev/phy_id", base));
+        let speed = read(&format!("{}/speed", base));
+        let state = read(&format!("{}/operstate", base));
+        let (ipv4, ipv6, gw) = ips.get(&n).cloned().unwrap_or_default();
+        let mut model = driver_name(&drv).to_string();
+        let phyn = phy_name(&phy);
+        if !phyn.is_empty() {
+            model = if model.is_empty() { phyn.to_string() } else { format!("{} + PHY {}", model, phyn) };
+        }
         out.push(json!({
-            "name": i.friendly_name.clone().unwrap_or(i.name.clone()),
-            "type": format!("{:?}", i.if_type),
+            "name": n,
+            "type": if wireless { "Wi-Fi" } else { "Ethernet" },
             "mac": mac,
+            "state": state,
+            "up": state == "up",
+            "link_mbps": speed.parse::<i64>().ok().filter(|x| *x > 0),
+            "driver": drv,
+            "phy_id": phy,
+            "model": model,
             "ipv4": ipv4,
             "ipv6": ipv6,
-            "gateway": i.gateway.as_ref().map(|g| g.ip_addr.to_string()),
-            "speed_mbps": i.transmit_speed.map(|s| s / 1_000_000),
+            "gateway": gw,
         }));
     }
     json!(out)
 }
 
-#[cfg(target_os = "ios")]
+#[cfg(windows)]
 fn nics() -> Value {
-    json!([])
+    let ips = ip_map();
+    let raw = ps(
+        "Get-NetAdapter -IncludeHidden:$false | Select-Object Name, InterfaceDescription, MacAddress, Status, LinkSpeed, DriverVersion, Virtual, MediaType, PhysicalMediaType | ConvertTo-Json -Compress",
+    );
+    let parsed: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    let list: Vec<Value> = match parsed {
+        Value::Array(a) => a,
+        Value::Object(_) => vec![parsed],
+        _ => vec![],
+    };
+    let mut out = Vec::new();
+    for a in list {
+        let name = a["Name"].as_str().unwrap_or("").to_string();
+        let (ipv4, ipv6, gw) = ips.get(&name).cloned().unwrap_or_default();
+        let media = a["PhysicalMediaType"].as_str().unwrap_or("");
+        let wireless = media.contains("802.11") || media.contains("Wireless") || name.to_lowercase().contains("wi-fi");
+        let status = a["Status"].as_str().unwrap_or("").to_string();
+        out.push(json!({
+            "name": name,
+            "type": if a["Virtual"].as_bool().unwrap_or(false) { "виртуальный" } else if wireless { "Wi-Fi" } else { "Ethernet" },
+            "mac": a["MacAddress"].as_str().unwrap_or("").replace('-', ":").to_lowercase(),
+            "state": status,
+            "up": status == "Up",
+            "link": a["LinkSpeed"].as_str().unwrap_or(""),
+            "driver": a["DriverVersion"].as_str().unwrap_or(""),
+            "model": a["InterfaceDescription"].as_str().unwrap_or(""),
+            "ipv4": ipv4,
+            "ipv6": ipv6,
+            "gateway": gw,
+        }));
+    }
+    if out.is_empty() {
+        // PowerShell недоступен — хотя бы поднятые интерфейсы
+        for (n, (ipv4, ipv6, gw)) in ips {
+            out.push(json!({ "name": n, "ipv4": ipv4, "ipv6": ipv6, "gateway": gw, "up": true }));
+        }
+    }
+    json!(out)
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn nics() -> Value {
+    let ips = ip_map();
+    json!(ips.into_iter().map(|(n, (ipv4, ipv6, gw))| json!({ "name": n, "ipv4": ipv4, "ipv6": ipv6, "gateway": gw, "up": true })).collect::<Vec<_>>())
+}
+
+// ---- железо ---------------------------------------------------------------------
+
+#[cfg(windows)]
+fn hardware() -> Value {
+    let script = r#"
+$r = [ordered]@{}
+try { $b = Get-CimInstance Win32_BaseBoard; $r.board = ($b.Manufacturer + ' ' + $b.Product).Trim(); $r.board_serial = $b.SerialNumber } catch {}
+try { $bi = Get-CimInstance Win32_BIOS; $r.bios = ($bi.Manufacturer + ' ' + $bi.SMBIOSBIOSVersion + ' ' + $bi.ReleaseDate.ToString('yyyy-MM-dd')).Trim() } catch {}
+try { $cs = Get-CimInstance Win32_ComputerSystem; $r.model = ($cs.Manufacturer + ' ' + $cs.Model).Trim(); $r.domain = $cs.Domain } catch {}
+try { $r.memory_modules = @(Get-CimInstance Win32_PhysicalMemory | ForEach-Object { [string][math]::Round($_.Capacity/1GB) + ' GB ' + $_.Manufacturer + ' ' + $_.PartNumber.Trim() + ' ' + $_.Speed + ' MHz ' + $_.DeviceLocator }) } catch {}
+try { $r.disks = @(Get-PhysicalDisk | ForEach-Object { $_.FriendlyName + ' ' + [math]::Round($_.Size/1GB) + ' GB ' + $_.MediaType + ' ' + $_.BusType + ' (' + $_.HealthStatus + ')' }) } catch {}
+if (-not $r.disks) { try { $r.disks = @(Get-CimInstance Win32_DiskDrive | ForEach-Object { $_.Model + ' ' + [math]::Round($_.Size/1GB) + ' GB ' + $_.InterfaceType }) } catch {} }
+try { $r.monitors = @(Get-CimInstance -Namespace root/wmi WmiMonitorID | ForEach-Object { (($_.ManufacturerName | Where-Object { $_ }) | ForEach-Object { [char]$_ }) -join '' } ) } catch {}
+try { $r.monitors = @(Get-CimInstance -Namespace root/wmi WmiMonitorID | ForEach-Object { $m = (($_.ManufacturerName | ? { $_ }) | % { [char]$_ }) -join ''; $n = (($_.UserFriendlyName | ? { $_ }) | % { [char]$_ }) -join ''; $sn = (($_.SerialNumberID | ? { $_ }) | % { [char]$_ }) -join ''; ($m + ' ' + $n + ' ' + $sn).Trim() }) } catch {}
+try { $r.sound = @(Get-CimInstance Win32_SoundDevice | ForEach-Object { $_.Name }) } catch {}
+try { $r.usb = @(Get-PnpDevice -PresentOnly -Class USB,HIDClass,Keyboard,Mouse,Camera,Printer,Image -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -and $_.FriendlyName -notmatch 'Hub|Host Controller|Composite|Generic|Root' } | Select-Object -ExpandProperty FriendlyName -Unique) } catch {}
+try { $r.printers = @(Get-Printer -ErrorAction SilentlyContinue | Where-Object { -not $_.Shared -or $true } | ForEach-Object { $_.Name + ' (' + $_.DriverName + ', ' + $_.PortName + ')' }) } catch {}
+try { $r.battery = (Get-CimInstance Win32_Battery | Select-Object -First 1).EstimatedChargeRemaining } catch {}
+try { $r.uptime_hours = [math]::Round(((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalHours) } catch {}
+$r | ConvertTo-Json -Compress -Depth 3
+"#;
+    serde_json::from_str(&ps(script)).unwrap_or_else(|_| json!({}))
+}
+
+#[cfg(target_os = "android")]
+fn hardware() -> Value {
+    json!({
+        "model": format!("{} {}", getprop("ro.product.manufacturer"), getprop("ro.product.model")).trim().to_string(),
+        "board": getprop("ro.product.board"),
+        "platform": getprop("ro.board.platform"),
+        "bootloader": getprop("ro.bootloader"),
+        "kernel": read("/proc/version").split(" (").next().unwrap_or("").replace("Linux version ", ""),
+        "wifi_driver": std::fs::read_link("/sys/class/net/wlan0/device/driver").ok().and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string())).unwrap_or_default(),
+        "bt_name": getprop("persist.btauto.name"),
+        "usb": usb_devices(),
+        "uptime_hours": read("/proc/uptime").split('.').next().and_then(|x| x.parse::<u64>().ok()).map(|s| s / 3600),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn hardware() -> Value {
+    json!({
+        "model": run("sh", &["-c", "cat /sys/devices/virtual/dmi/id/sys_vendor /sys/devices/virtual/dmi/id/product_name 2>/dev/null | tr '\\n' ' '"]).trim(),
+        "board": run("sh", &["-c", "cat /sys/devices/virtual/dmi/id/board_vendor /sys/devices/virtual/dmi/id/board_name 2>/dev/null | tr '\\n' ' '"]).trim(),
+        "bios": run("sh", &["-c", "cat /sys/devices/virtual/dmi/id/bios_vendor /sys/devices/virtual/dmi/id/bios_version /sys/devices/virtual/dmi/id/bios_date 2>/dev/null | tr '\\n' ' '"]).trim(),
+        "kernel": run("uname", &["-r"]),
+        "disks": lines(run("sh", &["-c", "lsblk -dno NAME,MODEL,SIZE,ROTA,TRAN 2>/dev/null | sed 's/  */ /g'"])),
+        "pci": lines(run("sh", &["-c", "lspci 2>/dev/null | grep -iE 'ethernet|network|wireless' | cut -d: -f3- | sed 's/^ *//'"])),
+        "usb": usb_devices(),
+        "uptime_hours": read("/proc/uptime").split('.').next().and_then(|x| x.parse::<u64>().ok()).map(|s| s / 3600),
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn hardware() -> Value {
+    json!({ "model": run("sysctl", &["-n", "hw.model"]) })
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn usb_devices() -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(d) = std::fs::read_dir("/sys/bus/usb/devices") {
+        for e in d.filter_map(|e| e.ok()) {
+            let base = e.path();
+            let product = read(&format!("{}/product", base.display()));
+            if product.is_empty() || product.contains("Host Controller") || product.contains("hub") || product.contains("Hub") {
+                continue;
+            }
+            let vid = read(&format!("{}/idVendor", base.display()));
+            let pid = read(&format!("{}/idProduct", base.display()));
+            let man = read(&format!("{}/manufacturer", base.display()));
+            out.push(format!("{} {} [{}:{}]", man, product, vid, pid).trim().to_string());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 // ---- безопасность -----------------------------------------------------------------
@@ -350,7 +548,6 @@ fn security() -> Value {
         "sdk": getprop("ro.build.version.sdk"),
         "fingerprint": getprop("ro.build.fingerprint"),
         "model": format!("{} {}", getprop("ro.product.manufacturer"), getprop("ro.product.model")).trim().to_string(),
-        "ethernet_link_mbps": read("/sys/class/net/eth0/speed"),
         "bootloader_locked": getprop("ro.boot.flash.locked"),
         "debuggable": getprop("ro.debuggable") == "1",
         "selinux": { let s = run("getenforce", &[]); if s.is_empty() { getprop("ro.boot.selinux") } else { s } },
