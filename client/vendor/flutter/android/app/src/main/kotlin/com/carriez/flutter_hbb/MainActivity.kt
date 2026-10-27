@@ -998,7 +998,9 @@ class MainActivity : FlutterActivity() {
     override fun onStop() {
         super.onStop()
         val disableFloatingWindow = FFI.getLocalOption("disable-floating-window") == "Y"
-        if (!disableFloatingWindow && MainService.isReady) {
+        // Fixtech: на Android TV плавающая кнопка не нужна (нет тача) и мешает в эфире — не показываем.
+        val isTv = packageManager.hasSystemFeature("android.software.leanback")
+        if (!disableFloatingWindow && !isTv && MainService.isReady) {
             startService(Intent(this, FloatingWindowService::class.java))
         }
     }
