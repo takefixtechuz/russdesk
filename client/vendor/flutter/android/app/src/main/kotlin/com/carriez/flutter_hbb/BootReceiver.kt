@@ -22,7 +22,10 @@ class BootReceiver : BroadcastReceiver() {
         if (Intent.ACTION_BOOT_COMPLETED == intent.action || DEBUG_BOOT_COMPLETED == intent.action) {
             // check SharedPreferences config
             val prefs = context.getSharedPreferences(KEY_SHARED_PREFERENCES, FlutterActivity.MODE_PRIVATE)
-            if (!prefs.getBoolean(KEY_START_ON_BOOT_OPT, false)) {
+            // Fixtech: на Android TV (leanback) автозапуск включён по умолчанию — переключатель в
+            // настройках скрыт нашей сборкой, а телевизор после выключения иначе остаётся без службы.
+            val isTv = context.packageManager.hasSystemFeature("android.software.leanback")
+            if (!prefs.getBoolean(KEY_START_ON_BOOT_OPT, isTv)) {
                 Log.d(logTag, "KEY_START_ON_BOOT_OPT is false")
                 return
             }
